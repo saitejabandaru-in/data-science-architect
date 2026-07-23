@@ -27,6 +27,19 @@ from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, balanced_ac
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, classification_report
 
 
+def format_markdown_table(df: pd.DataFrame) -> str:
+    """Formats DataFrame to Markdown table safely without requiring tabulate."""
+    try:
+        return df.to_markdown(index=False)
+    except Exception:
+        headers = list(df.columns)
+        lines = ["| " + " | ".join(headers) + " |"]
+        lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+        for _, row in df.iterrows():
+            lines.append("| " + " | ".join([str(val) for val in row.values]) + " |")
+        return "\n".join(lines)
+
+
 def run_data_science_workflow(
     dataset_path: str,
     target_col: str = None,
@@ -73,8 +86,8 @@ def run_data_science_workflow(
     X = df.drop(columns=[target_col])
     y = df[target_col]
 
-    # Remove high-cardinality ID columns (heuristic: string/object columns with unique values equal to row count)
-    id_cols = [c for c in X.select_dtypes(include=['object', 'string']).columns if X[c].nunique() == len(X)]
+    # Remove high-cardinality ID columns
+    id_cols = [c for c in X.select_dtypes(include=['object', 'string', 'str']).columns if X[c].nunique() == len(X)]
     if id_cols:
         print(f"  • Removing ID columns: {id_cols}")
         X = X.drop(columns=id_cols)
@@ -96,8 +109,8 @@ def run_data_science_workflow(
     # STEP 4: Feature Engineering & Preprocessing Pipeline
     # -------------------------------------------------------------
     print("\n[Step 4] Building Preprocessing Pipeline...")
-    num_cols = X.select_dtypes(include=['int64', 'float64']).columns.tolist()
-    cat_cols = X.select_dtypes(include=['object', 'category', 'bool']).columns.tolist()
+    num_cols = X.select_dtypes(include=['int64', 'float64', 'int32', 'float32']).columns.tolist()
+    cat_cols = X.select_dtypes(include=['object', 'category', 'bool', 'string', 'str']).columns.tolist()
 
     print(f"  • Numerical features ({len(num_cols)}): {num_cols}")
     print(f"  • Categorical features ({len(cat_cols)}): {cat_cols}")
@@ -118,7 +131,7 @@ def run_data_science_workflow(
     ])
 
     # Split dataset into train and test holdout
-    stratify_arg = y if problem_type == "classification" and y.nunique() > 1 else None
+    stratify_arg = y if problem_type == "classification" and y.nunique() > 1 and y.value_counts().min() >= 2 else None
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=stratify_arg
     )
@@ -136,15 +149,19 @@ def run_data_science_workflow(
             "Extra Trees": ExtraTreesClassifier(n_estimators=100, random_state=42),
             "Gradient Boosting": GradientBoostingClassifier(n_estimators=100, random_state=42)
         }
-        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-        scoring = {'accuracy': 'accuracy', 'f1': 'f1_weighted', 'roc_auc': 'roc_auc_ovr'}
+
+        min_class_samples = y_train.value_counts().min()
+        n_splits = max(2, min(5, min_class_samples))
+        cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+        scoring = {'accuracy': 'accuracy', 'f1': 'f1_weighted'}
     else:
         models = {
             "Baseline (Ridge Regression)": Ridge(random_state=42),
             "Random Forest Regressor": RandomForestRegressor(n_estimators=100, random_state=42),
             "Gradient Boosting Regressor": GradientBoostingRegressor(n_estimators=100, random_state=42)
         }
-        cv = KFold(n_splits=5, shuffle=True, random_state=42)
+        n_splits = max(2, min(5, len(y_train) // 2))
+        cv = KFold(n_splits=n_splits, shuffle=True, random_state=42)
         scoring = {'rmse': 'neg_root_mean_squared_error', 'r2': 'r2', 'mae': 'neg_mean_absolute_error'}
 
     model_results = []
@@ -160,7 +177,7 @@ def run_data_science_workflow(
             mean_acc = cv_scores['test_accuracy'].mean()
             mean_f1 = cv_scores['test_f1'].mean()
             print(f"  • {name:<30} | Accuracy: {mean_acc:.4f} | F1-Score: {mean_f1:.4f}")
-            model_results.append({'Model': name, 'Accuracy': mean_acc, 'F1-Score': mean_f1})
+            model_results.append({'Model': name, 'Accuracy': round(mean_acc, 4), 'F1-Score': round(mean_f1, 4)})
 
             if mean_f1 > best_score:
                 best_score = mean_f1
@@ -170,7 +187,7 @@ def run_data_science_workflow(
             mean_r2 = cv_scores['test_r2'].mean()
             mean_rmse = -cv_scores['test_rmse'].mean()
             print(f"  • {name:<30} | R² Score: {mean_r2:.4f} | RMSE: {mean_rmse:.4f}")
-            model_results.append({'Model': name, 'R2': mean_r2, 'RMSE': mean_rmse})
+            model_results.append({'Model': name, 'R2': round(mean_r2, 4), 'RMSE': round(mean_rmse, 4)})
 
             if mean_r2 > best_score:
                 best_score = mean_r2
@@ -208,7 +225,6 @@ def run_data_science_workflow(
     fitted_model = best_pipeline.named_steps['model']
     fitted_prep = best_pipeline.named_steps['preprocessor']
 
-    # Extract feature names after One-Hot Encoding
     encoded_cat_names = []
     if cat_cols:
         cat_encoder = fitted_prep.named_transformers_['cat'].named_steps['encoder']
@@ -264,7 +280,7 @@ def run_data_science_workflow(
     results_df = pd.DataFrame(model_results)
     metric_col = 'F1-Score' if problem_type == "classification" else 'R2'
 
-    sns.barplot(data=results_df, x='Model', y=metric_col, palette='viridis')
+    sns.barplot(data=results_df, x='Model', y=metric_col, hue='Model', legend=False, palette='viridis')
     plt.title(f'Data Science Architect - Model Comparison ({metric_col})', fontsize=12, fontweight='bold')
     plt.ylabel(metric_col, fontsize=11)
     plt.xlabel('Algorithm', fontsize=11)
@@ -301,9 +317,7 @@ The **Data Science Architect** pipeline evaluated multiple model families using 
 
 ## 2. Model Performance Benchmarks
 
-```
-{results_df.to_markdown(index=False)}
-```
+{format_markdown_table(results_df)}
 
 ---
 
@@ -327,7 +341,7 @@ The **Data Science Architect** pipeline evaluated multiple model families using 
 ## 4. Top Predictive Features
 """
     if not feature_importance_df.empty:
-        report_md += f"\n```\n{feature_importance_df.head(10).to_markdown(index=False)}\n```\n"
+        report_md += f"\n{format_markdown_table(feature_importance_df.head(10))}\n"
 
     report_md += """
 ---
